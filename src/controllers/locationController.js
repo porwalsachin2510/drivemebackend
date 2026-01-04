@@ -9,10 +9,14 @@ export const detectUserLocation = async (req, res) => {
 
 
         // Get user's IP from request
-        const userIp =
-            req.headers["x-forwarded-for"]?.split(",")[0] || req.headers["x-real-ip"] || req.connection.remoteAddress
+        let userIp =
+            req.headers["cf-connecting-ip"] ||          // Cloudflare
+            req.headers["x-forwarded-for"]?.split(",")[0] ||
+            req.headers["x-real-ip"] ||
+            req.socket?.remoteAddress ||
+            null;
 
-        // For localhost/development, default to Kuwait
+        //For localhost/development, default to Kuwait
         if (!userIp || userIp === "::1" || userIp === "127.0.0.1" || userIp.includes("192.168")) {
 
             await User.findOneAndUpdate(
@@ -31,7 +35,17 @@ export const detectUserLocation = async (req, res) => {
         }
         try {
             // Use ipapi.co to detect location from backend (no CORS issues)
-            const response = await axios.get(`https://ipapi.co/${userIp}/json/`)
+            const response = await axios.get(`https://ipapi.co/${userIp}/json/`, {
+                headers: {
+                    "User-Agent": "Mozilla/5.0 (Backend Service)",
+                    "Accept": "application/json",
+                },
+                timeout: 5000,
+            })
+
+            console.log("location api", `https://ipapi.co/${userIp}/json/`);
+
+            console.log("country_name", response.data.country_name);
 
 
             const countryName = response.data.country_name
@@ -51,7 +65,7 @@ export const detectUserLocation = async (req, res) => {
                 { new: true }
             );
 
-            console.log("userresponse", userres);
+
 
             return res.status(200).json({
                 success: true,
@@ -68,6 +82,11 @@ export const detectUserLocation = async (req, res) => {
                 { $set: { nationality: null } },
                 { new: true }
             );
+
+            console.error("ipapi request failed:", {
+                status: apiError.response?.status,
+                data: apiError.response?.data,
+            });
 
             console.error("Error calling ipapi.co:", apiError.message)
             // Default to Kuwait if geolocation API fails
@@ -90,3 +109,4 @@ export const detectUserLocation = async (req, res) => {
         })
     }
 }
+
