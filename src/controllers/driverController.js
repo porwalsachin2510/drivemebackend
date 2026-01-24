@@ -1,6 +1,13 @@
 import Driver from "../models/Driver.js"
+import User from "../models/User.js"
 import CorporateDriver from "../models/CorporateDriver.js"
 import { uploadToCloudinary } from "../Config/Cloudinary.js"
+import { sendDriverCredentials } from "../Services/emailService.js"
+import crypto from "crypto"
+
+export const generateRandomPassword = () => {
+    return crypto.randomBytes(6).toString('hex');
+}
 
 export const createDriver = async (req, res) => {
     try {
@@ -88,10 +95,67 @@ export const createDriver = async (req, res) => {
 
         const driver = await Driver.create(driverData)
 
+        // Create User account for driver with B2B_PARTNER_DRIVER role
+        const generatedPassword = generateRandomPassword()
+        const userData = {
+            role: "B2B_PARTNER_DRIVER",
+            fullName: req.body.name,
+            email: req.body.email,
+            whatsappNumber: req.body.phone,
+            password: generatedPassword,
+            employedBy: req.userId,
+            driverId: driver._id,
+            driverModel: "Driver",
+            driverInfo: {
+                licenseNumber: req.body.licenseNumber,
+                licenseExpiry: req.body.licenseExpiry,
+                licenseType: req.body.licenseType,
+                dateOfBirth: req.body.dateOfBirth,
+                nationality: req.body.nationality,
+                address: {
+                    street: req.body["address[street]"] || req.body.street,
+                    city: req.body["address[city]"] || req.body.city,
+                    country: req.body["address[country]"] || req.body.country,
+                },
+                experience: {
+                    years: experienceYears,
+                    description: req.body["experience[description]"] || req.body.experienceDescription,
+                },
+                documents: driverData.documents,
+                status: "AVAILABLE",
+            },
+        }
+
+        const userDriver = await User.create(userData)
+
+        // Send email with login credentials to driver
+        try {
+            const fleetOwner = await User.findById(req.userId)
+            const emailResult = await sendDriverCredentials(
+                req.body.email,
+                generatedPassword,
+                req.body.name,
+                fleetOwner?.companyName || 'Your Company'
+            )
+
+            if (emailResult.success) {
+                console.log(`Driver credentials email sent to: ${req.body.email}`)
+            } else {
+                console.error('Failed to send driver credentials email:', emailResult.message)
+            }
+        } catch (emailError) {
+            console.error('Error sending driver credentials email:', emailError)
+        }
+
         res.status(201).json({
             success: true,
-            message: "Driver created successfully",
+            message: "B2B Partner Driver registered successfully! Login credentials sent to driver's email.",
             driver,
+            userDriver: {
+                id: userDriver._id,
+                email: userDriver.email,
+                role: userDriver.role,
+            },
         })
     } catch (error) {
         console.error("[v0] Error creating driver:", error.message)
@@ -323,12 +387,70 @@ export const createCorporateDriver = async (req, res) => {
             }
         }
 
-        const driver = await CorporateDriver.create(driverData)
+        const corporateDriver = await CorporateDriver.create(driverData)
+
+        // Create User account for driver with CORPORATE_DRIVER role
+        const generatedPassword = generateRandomPassword()
+        const userData = {
+            role: "CORPORATE_DRIVER",
+            fullName: req.body.name,
+            email: req.body.email,
+            whatsappNumber: req.body.phone,
+            password: generatedPassword,
+            employedBy: req.userId,
+            driverId: corporateDriver._id,
+            driverModel: "CorporateDriver",
+            driverInfo: {
+                licenseNumber: req.body.licenseNumber,
+                licenseExpiry: req.body.licenseExpiry,
+                licenseType: req.body.licenseType,
+                dateOfBirth: req.body.dateOfBirth,
+                nationality: req.body.nationality,
+                address: {
+                    street: req.body["address[street]"] || req.body.street,
+                    city: req.body["address[city]"] || req.body.city,
+                    country: req.body["address[country]"] || req.body.country,
+                },
+                experience: {
+                    years: experienceYears,
+                    description: req.body["experience[description]"] || req.body.experienceDescription,
+                },
+                documents: driverData.documents,
+                status: "AVAILABLE",
+            },
+        }
+
+        const userDriver = await User.create(userData)
+
+        // Send email with login credentials to driver
+        try {
+            const corporateOwner = await User.findById(req.userId)
+            const emailResult = await sendDriverCredentials(
+                req.body.email,
+                generatedPassword,
+                req.body.name,
+                corporateOwner?.companyName || 'Your Company'
+            )
+
+            if (emailResult.success) {
+                console.log(`Corporate driver credentials email sent to: ${req.body.email}`)
+            } else {
+                console.error('Failed to send corporate driver credentials email:', emailResult.message)
+            }
+        } catch (emailError) {
+            console.error('Error sending corporate driver credentials email:', emailError)
+        }
+
 
         res.status(201).json({
             success: true,
-            message: "Driver created successfully",
-            driver,
+            message: "Corporate Driver registered successfully! Login credentials sent to driver's email.",
+            driver: corporateDriver,
+            userDriver: {
+                id: userDriver._id,
+                email: userDriver.email,
+                role: userDriver.role,
+            },
         })
     } catch (error) {
         console.error("[v0] Error creating driver:", error.message)

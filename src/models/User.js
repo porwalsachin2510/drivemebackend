@@ -5,7 +5,7 @@ const userSchema = new mongoose.Schema(
     {
         role: {
             type: String,
-            enum: ["COMMUTER", "CORPORATE", "B2C_PARTNER", "B2B_PARTNER"],
+            enum: ["COMMUTER", "CORPORATE", "B2C_PARTNER", "B2B_PARTNER", "B2B_PARTNER_DRIVER", "CORPORATE_DRIVER"],
             required: true,
         },
         fullName: {
@@ -87,6 +87,68 @@ const userSchema = new mongoose.Schema(
                 images: [String],
             },
         ],
+
+        // Driver specific fields for B2B_PARTNER_DRIVER and CORPORATE_DRIVER
+        driverInfo: {
+            licenseNumber: String,
+            licenseExpiry: Date,
+            licenseType: {
+                type: String,
+                enum: ["Light", "Medium", "Heavy", "Commercial"],
+            },
+            dateOfBirth: Date,
+            nationality: String,
+            address: {
+                street: String,
+                city: String,
+                country: String,
+            },
+            experience: {
+                years: Number,
+                description: String,
+            },
+            documents: {
+                license: String,
+                passport: String,
+                visa: String,
+                medicalCertificate: String,
+            },
+            ratings: {
+                average: {
+                    type: Number,
+                    default: 0,
+                    min: 0,
+                    max: 5,
+                },
+                count: {
+                    type: Number,
+                    default: 0,
+                },
+            },
+            status: {
+                type: String,
+                enum: ["AVAILABLE", "ASSIGNED", "INACTIVE"],
+                default: "AVAILABLE",
+            },
+        },
+        // Reference to fleet owner or corporate owner
+        employedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: null,
+        },
+        
+        driverId: {
+            type: mongoose.Schema.Types.ObjectId,
+            refPath: "driverModel",
+            default: null,
+        },
+        // Specify which driver model to reference
+        driverModel: {
+            type: String,
+            enum: ["Driver", "CorporateDriver"],
+            default: null,
+        },
         acceptedPaymentMethods: {
             type: [String],
             default: [],

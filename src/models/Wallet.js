@@ -21,6 +21,18 @@ const walletSchema = new mongoose.Schema(
             min: 0,
         },
 
+        minimumRequiredBalance: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+
+        commissionDebt: {
+            type: Number,
+            default: 0,
+            min: 0,
+        },
+
         securityDepositHeld: {
             type: Number,
             default: 0,
@@ -48,6 +60,53 @@ const walletSchema = new mongoose.Schema(
             type: Boolean,
             default: true,
         },
+        transactions: [{
+            type: {
+                type: String,
+                enum: ["DEPOSIT", "WITHDRAWAL", "TRANSFER", "PAYOUT"],
+                required: true,
+            },
+            amount: {
+                type: Number,
+                required: true,
+            },
+            description: {
+                type: String,
+                required: true,
+            },
+            paymentMethod: {
+                type: String,
+            },
+            bankAccount: {
+                type: String,
+            },
+            payoutMethod: {
+                type: String,
+            },
+            status: {
+                type: String,
+                enum: ["PENDING", "COMPLETED", "FAILED"],
+                default: "COMPLETED",
+            },
+            recipientId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: "User",
+            },
+            recipientName: {
+                type: String,
+            },
+            senderId: {
+                type: mongoose.Schema.Types.ObjectId,
+                ref: "User",
+            },
+            senderName: {
+                type: String,
+            },
+            createdAt: {
+                type: Date,
+                default: Date.now,
+            },
+        }],
     },
     { timestamps: true },
 )

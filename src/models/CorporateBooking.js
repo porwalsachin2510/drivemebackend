@@ -22,6 +22,11 @@ const corporateBookingSchema = new mongoose.Schema(
             ref: "Contract",
             required: true,
         },
+        driverId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            required: true,
+        },
         // Booking Details
         pickupLocation: {
             type: String,
@@ -56,7 +61,7 @@ const corporateBookingSchema = new mongoose.Schema(
         // Status
         bookingStatus: {
             type: String,
-            enum: ["CONFIRMED", "COMPLETED", "CANCELLED"],
+            enum: ["CONFIRMED", "IN_PROGRESS", "COMPLETED", "CANCELLED"],
             default: "CONFIRMED",
         },
         // Driver/Vehicle Info
@@ -69,6 +74,7 @@ const corporateBookingSchema = new mongoose.Schema(
         // Additional Info
         passengerNotes: String,
         cancelledAt: Date,
+        startedAt: Date,
         completedAt: Date,
         rating: Number,
         review: String,

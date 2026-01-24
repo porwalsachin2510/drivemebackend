@@ -79,7 +79,7 @@ const b2cPassengerBookingSchema = new mongoose.Schema(
         // Status
         bookingStatus: {
             type: String,
-            enum: ["PENDING", "CONFIRMED", "REJECTED", "CANCELLED", "COMPLETED"],
+            enum: ["PENDING", "CONFIRMED", "IN_PROGRESS", "REJECTED", "CANCELLED", "COMPLETED"],
             default: "PENDING",
         },
         // Driver/Vehicle Info

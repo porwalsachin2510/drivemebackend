@@ -9,3 +9,13 @@ export const calculateCommission = (amount) => {
         fleetOwnerAmount: fleetOwnerAmount,
     }
 }
+
+export const calculateDriverCommission = (amount) => {
+    const commission = (amount * ADMIN_COMMISSION_PERCENTAGE) / 100
+    const driverEarnings = amount - commission
+    return {
+        totalAmount: amount,
+        adminCommission: commission,
+        driverEarnings: driverEarnings,
+    }
+}

@@ -2092,9 +2092,12 @@ import User from "../models/User.js"
 import Route from "../models/Route.js"
 import Wallet from "../models/Wallet.js"
 import Notification from "../models/Notification.js"
+import Transaction from "../models/Transaction.js"
 import stripe from "../Config/stripe.js"
 import tapPayments from "../Config/tapPayments.js"
-import { calculateCommission, ADMIN_COMMISSION_PERCENTAGE } from "../Services/HelperUtilities.js"
+import { calculateCommission, calculateDriverCommission } from "../Services/HelperUtilities.js"
+import { sendRealTimeNotification, sendBookingUpdate } from "../Services/socketService.js"
+import { createNotification } from "./notificationController.js"
 
 // Check if route is available for booking
 export const checkRouteAvailability = async (req, res) => {
@@ -2295,7 +2298,7 @@ export const createB2CBooking = async (req, res) => {
             })
         }
 
-        const commissionData = calculateCommission(paymentAmount, ADMIN_COMMISSION_PERCENTAGE)
+        const commissionData = calculateCommission(paymentAmount)
 
         const booking = new B2CPassengerBooking({
             passengerId,
@@ -2408,22 +2411,27 @@ export const createB2CBooking = async (req, res) => {
             })
         } else {
             // CASH payment
-            await Notification.create({
-                recipientId: partnerId,
+            // Send notification to partner
+            const notification = await createNotification({
                 userId: partnerId,
                 type: "NEW_BOOKING",
-                title: "New Booking Request (Cash Payment)",
+                title: "New Booking Request",
                 message: `New booking from ${passenger.fullName} - Amount: AED ${paymentAmount}`,
+                relatedUserId: passengerId,
+                bookingId: booking._id,
+            })
+
+            // Send real-time notification
+            await sendRealTimeNotification(partnerId, {
+                type: "NEW_BOOKING",
+                title: notification.title,
+                message: notification.message,
                 data: {
                     bookingId: booking._id,
                     passengerId,
-                    pickupLocation,
-                    dropoffLocation,
-                    travelDate,
-                    paymentAmount,
-                    paymentMethod: "CASH",
-                },
-                status: "UNREAD",
+                    partnerId,
+                    notification
+                }
             })
 
             return res.status(201).json({
@@ -2459,7 +2467,16 @@ export const createCorporateBooking = async (req, res) => {
             driverName,
             driverImage,
             passengerNotes,
+            driverId,
         } = req.body
+
+        // Validate required fields
+        if (!driverId) {
+            return res.status(400).json({
+                success: false,
+                message: "Driver ID is required for corporate booking"
+            })
+        }
 
         if (!routeId || !corporateOwnerId || !travelDate) {
             return res.status(400).json({
@@ -2498,6 +2515,22 @@ export const createCorporateBooking = async (req, res) => {
             })
         }
 
+        // Validate driver exists and is a corporate driver
+        const driver = await User.findById(driverId)
+        if (!driver) {
+            return res.status(404).json({
+                success: false,
+                message: "Driver not found",
+            })
+        }
+
+        if (driver.role !== "B2B_PARTNER_DRIVER" && driver.role !== "CORPORATE_DRIVER") {
+            return res.status(400).json({
+                success: false,
+                message: "Assigned user is not a corporate driver",
+            })
+        }
+
         const corporateBookedSeatsResult = await CorporateBooking.aggregate([
             {
                 $match: {
@@ -2532,6 +2565,7 @@ export const createCorporateBooking = async (req, res) => {
             corporateOwnerId,
             routeId,
             contractId: contractId || null,
+            driverId,
             pickupLocation,
             dropoffLocation,
             travelPath,
@@ -2555,41 +2589,61 @@ export const createCorporateBooking = async (req, res) => {
             },
         )
 
-        // Send notification to corporate owner
         const corporateOwner = await User.findById(corporateOwnerId)
-        await Notification.create({
-            recipientId: corporateOwnerId,
+
+        // Send notification to corporate owner
+        const ownerNotification = await createNotification({
             userId: corporateOwnerId,
-            type: "CORPORATE_BOOKING",
+            type: "NEW_CORPORATE_BOOKING",
             title: "Employee Booking Confirmed",
             message: `${passenger.fullName} has booked ${numberOfSeats} seat(s) for ${new Date(travelDate).toLocaleDateString()}`,
+            relatedUserId: passengerId,
+            bookingId: booking._id,
+        })
+
+        // Send real-time notification to corporate owner
+        await sendRealTimeNotification(corporateOwnerId, {
+            type: "CORPORATE_BOOKING",
+            title: ownerNotification.title,
+            message: ownerNotification.message,
             data: {
                 bookingId: booking._id,
                 passengerId,
-                employeeName: passenger.fullName,
-                pickupLocation,
-                dropoffLocation,
-                travelDate,
-                numberOfSeats,
-            },
-            status: "UNREAD",
+                corporateOwnerId,
+                notification: ownerNotification
+            }
         })
 
-        // Send confirmation to passenger
-        await Notification.create({
-            recipientId: passengerId,
-            userId: passengerId,
-            type: "BOOKING_CONFIRMED",
-            title: "Booking Confirmed",
-            message: `Your booking for ${new Date(travelDate).toLocaleDateString()} has been confirmed`,
+        // Send notification to assigned driver
+        const driverNotification = await createNotification({
+            userId: driverId,
+            type: "NEW_BOOKING",
+            title: "New Corporate Booking",
+            message: `New corporate booking from ${passenger.fullName} for ${new Date(travelDate).toLocaleDateString()}`,
+            relatedUserId: passengerId,
+            bookingId: booking._id,
+        })
+
+        // Send real-time notification to driver
+        await sendRealTimeNotification(driverId, {
+            type: "NEW_BOOKING",
+            title: driverNotification.title,
+            message: driverNotification.message,
             data: {
                 bookingId: booking._id,
-                pickupLocation,
-                dropoffLocation,
-                travelDate,
-                companyName: corporateOwner?.companyName || "Your Company",
-            },
-            status: "UNREAD",
+                passengerId,
+                driverId,
+                notification: driverNotification
+            }
+        })
+
+        // Send real-time booking update to passenger
+        await sendBookingUpdate(booking._id, 'corporate-booking-confirmed', {
+            bookingId: booking._id,
+            driverId: driverId,
+            driverName: driverName || driver.fullName,
+            driverImage: driverImage || driver.profileImage,
+            message: 'Your corporate booking has been confirmed'
         })
 
         return res.status(201).json({
@@ -2607,9 +2661,91 @@ export const createCorporateBooking = async (req, res) => {
 }
 
 // Partner: Accept Booking
+// export const acceptB2CBooking = async (req, res) => {
+//     try {
+//         const partnerId = req.userId
+//         const { bookingId } = req.params
+
+//         const booking = await B2CPassengerBooking.findById(bookingId)
+
+//         if (!booking) {
+//             return res.status(404).json({
+//                 success: false,
+//                 message: "Booking not found",
+//             })
+//         }
+
+//         if (booking.b2cPartnerId.toString() !== partnerId) {
+//             return res.status(403).json({
+//                 success: false,
+//                 message: "Unauthorized: This booking does not belong to you",
+//             })
+//         }
+
+//         // Check wallet balance for cash payment bookings
+//         if (booking.paymentMethod === "CASH") {
+//             const driverWallet = await Wallet.findOne({ userId: driverId })
+//             const commissionData = calculateDriverCommission(booking.paymentAmount)
+
+//             // Calculate required balance (commission + buffer)
+//             const requiredBalance = commissionData.adminCommission + 50 // 50 AED buffer
+
+//             if (!driverWallet || driverWallet.balance < requiredBalance) {
+//                 return res.status(400).json({
+//                     success: false,
+//                     message: `Insufficient wallet balance. You need at least ${requiredBalance} AED to accept this cash booking. Current balance: ${driverWallet?.balance || 0} AED.`,
+//                     requiresWalletFunding: true,
+//                     currentBalance: driverWallet?.balance || 0,
+//                     requiredBalance: requiredBalance,
+//                 })
+//             }
+//         }
+
+//         booking.bookingStatus = "CONFIRMED"
+//         await booking.save()
+
+//         const passenger = await User.findById(booking.passengerId)
+//         // Send notification to passenger
+//         const bookingConfirmedNotification = await createNotification({
+//             userId: booking.passengerId,
+//             title: "Booking Confirmed",
+//             message: `Your B2C booking from ${booking.pickupLocation} to ${booking.dropoffLocation} has been confirmed by the driver.`,
+//             type: "BOOKING_CONFIRMED",
+//             bookingId: booking._id,
+//         })
+
+//         // Send real-time notification to passenger
+//         sendRealTimeNotification(booking.passengerId, {
+//             type: "BOOKING_CONFIRMED",
+//             data: {
+//                 bookingId: booking._id,
+//                 message: `Your booking has been confirmed by the driver.`,
+//                 driverInfo: {
+//                     name: booking.driverName,
+//                     vehicle: booking.vehicleModel,
+//                     plate: booking.vehiclePlate,
+//                 },
+//             },
+//         })
+
+//         return res.status(200).json({
+//             success: true,
+//             booking,
+//             message: "Booking accepted successfully",
+//         })
+//     } catch (error) {
+//         console.error("Error accepting booking:", error)
+//         return res.status(500).json({
+//             success: false,
+//             message: "Server error",
+//         })
+//     }
+// }
+
+// Accept B2C Booking (Driver)
 export const acceptB2CBooking = async (req, res) => {
     try {
-        const partnerId = req.userId
+        const driverId = req.userId
         const { bookingId } = req.params
 
         const booking = await B2CPassengerBooking.findById(bookingId)
@@ -2621,45 +2757,73 @@ export const acceptB2CBooking = async (req, res) => {
             })
         }
 
-        if (booking.b2cPartnerId.toString() !== partnerId) {
+        if (booking.b2cPartnerId.toString() !== driverId) {
             return res.status(403).json({
                 success: false,
                 message: "Unauthorized: This booking does not belong to you",
             })
         }
 
+        // Check wallet balance for cash payment bookings
+        if (booking.paymentMethod === "CASH") {
+            const driverWallet = await Wallet.findOne({ userId: driverId })
+            const commissionData = calculateDriverCommission(booking.paymentAmount)
+
+            // Calculate required balance (commission + buffer)
+            const requiredBalance = commissionData.adminCommission + 50 // 50 AED buffer
+
+            if (!driverWallet || driverWallet.balance < requiredBalance) {
+                return res.status(400).json({
+                    success: false,
+                    message: `Insufficient wallet balance. You need at least ${requiredBalance} AED to accept this cash booking. Current balance: ${driverWallet?.balance || 0} AED.`,
+                    requiresWalletFunding: true,
+                    currentBalance: driverWallet?.balance || 0,
+                    requiredBalance: requiredBalance,
+                })
+            }
+        }
+
         booking.bookingStatus = "CONFIRMED"
         await booking.save()
 
-        const passenger = await User.findById(booking.passengerId)
-        await Notification.create({
-            recipientId: booking.passengerId,
+        // Send notification to passenger
+        const bookingConfirmedNotification = await createNotification({
             userId: booking.passengerId,
-            type: "BOOKING_ACCEPTED",
-            title: "Booking Accepted",
-            message: `Your booking has been accepted. Get ready for your ride!`,
-            data: {
-                bookingId: booking._id,
-                pickupLocation: booking.pickupLocation,
-                dropoffLocation: booking.dropoffLocation,
-                travelDate: booking.travelDate,
-            },
-            status: "UNREAD",
+            title: "Booking Confirmed",
+            message: `Your B2C booking from ${booking.pickupLocation} to ${booking.dropoffLocation} has been confirmed by the driver.`,
+            type: "BOOKING_CONFIRMED",
+            bookingId: booking._id,
         })
 
-        return res.status(200).json({
+        // Send real-time notification to passenger
+        sendRealTimeNotification(booking.passengerId, {
+            type: "BOOKING_CONFIRMED",
+            data: {
+                bookingId: booking._id,
+                message: `Your booking has been confirmed by the driver.`,
+                driverInfo: {
+                    name: booking.driverName,
+                    vehicle: booking.vehicleModel,
+                    plate: booking.vehiclePlate,
+                },
+            },
+        })
+
+        res.status(200).json({
             success: true,
             booking,
             message: "Booking accepted successfully",
         })
     } catch (error) {
         console.error("Error accepting booking:", error)
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             message: "Server error",
+            error: error.message,
         })
     }
 }
+
 
 // Partner: Reject Booking
 export const rejectB2CBooking = async (req, res) => {
@@ -2687,39 +2851,89 @@ export const rejectB2CBooking = async (req, res) => {
         booking.bookingStatus = "REJECTED"
         booking.rejectionReason = rejectionReason || "No reason provided"
 
+        // if (booking.paymentStatus === "COMPLETED" && booking.transactionId) {
+        //     try {
+        //         if (booking.paymentMethod === "STRIPE") {
+        //             // Create refund via Stripe
+        //             const refund = await stripe.refunds.create({
+        //                 payment_intent: booking.transactionId,
+        //                 reason: "requested_by_customer",
+        //             })
+        //             booking.paymentStatus = "REFUNDED"
+        //             booking.refundId = refund.id
+        //         } else if (booking.paymentMethod === "TAP") {
+        //             // TAP refund would need to be implemented
+        //             booking.paymentStatus = "REFUND_PENDING"
+        //         }
+        //     } catch (refundError) {
+        //         console.error("Refund error:", refundError)
+        //         booking.paymentStatus = "REFUND_FAILED"
+        //     }
+        // }
+
+        // Process refund for online payments
         if (booking.paymentStatus === "COMPLETED" && booking.transactionId) {
-            try {
-                if (booking.paymentMethod === "STRIPE") {
-                    // Create refund via Stripe
-                    const refund = await stripe.refunds.create({
-                        payment_intent: booking.transactionId,
-                        reason: "requested_by_customer",
-                    })
-                    booking.paymentStatus = "REFUNDED"
-                    booking.refundId = refund.id
-                } else if (booking.paymentMethod === "TAP") {
-                    // TAP refund would need to be implemented
-                    booking.paymentStatus = "REFUND_PENDING"
-                }
-            } catch (refundError) {
-                console.error("Refund error:", refundError)
-                booking.paymentStatus = "REFUND_FAILED"
+            const passengerWallet = await Wallet.findOne({ userId: booking.passengerId })
+
+            if (passengerWallet) {
+                const refundAmount = booking.paymentAmount
+                const balanceBefore = passengerWallet.balance
+
+                // Add refund amount to passenger wallet
+                passengerWallet.balance += refundAmount
+                await passengerWallet.save()
+
+                // Create refund transaction record
+                await Transaction.create({
+                    walletId: passengerWallet._id,
+                    userId: booking.passengerId,
+                    type: "CREDIT",
+                    amount: refundAmount,
+                    category: "REFUND",
+                    description: `Refund for rejected booking ${booking._id}`,
+                    referenceId: booking._id,
+                    referenceModel: "Payment",
+                    balanceBefore: balanceBefore,
+                    balanceAfter: passengerWallet.balance,
+                    metadata: {
+                        bookingId: booking._id,
+                        originalTransactionId: booking.transactionId,
+                        rejectionReason: booking.rejectionReason
+                    }
+                })
+
+                booking.paymentStatus = "REFUNDED"
+                booking.refundAmount = refundAmount
+                booking.refundProcessedAt = new Date()
+            } else {
+                console.error("Passenger wallet not found for refund:", booking.passengerId)
             }
         }
 
         await booking.save()
 
-        await Notification.create({
-            recipientId: booking.passengerId,
+        // Notify passenger
+        const rejectNotification = await createNotification({
             userId: booking.passengerId,
             type: "BOOKING_REJECTED",
             title: "Booking Rejected",
             message: `Your booking has been rejected. Reason: ${booking.rejectionReason}`,
+            relatedUserId: driverId,
+            bookingId: booking._id,
+        })
+
+        // Send real-time notification to passenger
+        await sendRealTimeNotification(booking.passengerId, {
+            type: "BOOKING_REJECTED",
+            title: rejectNotification.title,
+            message: rejectNotification.message,
             data: {
                 bookingId: booking._id,
+                driverId,
+                passengerId: booking.passengerId,
                 rejectionReason: booking.rejectionReason,
-            },
-            status: "UNREAD",
+                notification: rejectNotification
+            }
         })
 
         return res.status(200).json({
@@ -2736,9 +2950,10 @@ export const rejectB2CBooking = async (req, res) => {
     }
 }
 
-export const completeB2CBooking = async (req, res) => {
+// Start B2C Trip (Driver)
+export const startB2CTrip = async (req, res) => {
     try {
-        const partnerId = req.userId
+        const driverId = req.userId
         const { bookingId } = req.params
 
         const booking = await B2CPassengerBooking.findById(bookingId)
@@ -2750,29 +2965,257 @@ export const completeB2CBooking = async (req, res) => {
             })
         }
 
-        if (booking.b2cPartnerId.toString() !== partnerId) {
+        if (booking.b2cPartnerId.toString() !== driverId) {
             return res.status(403).json({
                 success: false,
-                message: "Unauthorized",
+                message: "Unauthorized - You can only start your own bookings",
             })
         }
 
         if (booking.bookingStatus !== "CONFIRMED") {
             return res.status(400).json({
                 success: false,
-                message: "Booking must be confirmed before completing",
+                message: "Booking must be confirmed before starting trip",
+            })
+        }
+
+        // Update booking status to IN_PROGRESS
+        booking.bookingStatus = "IN_PROGRESS"
+        booking.startedAt = new Date()
+        await booking.save()
+
+        // Create notification for passenger
+        await Notification.create({
+            recipientId: booking.passengerId,
+            userId: booking.passengerId,
+            type: "TRIP_STARTED",
+            title: "Trip Started",
+            message: `Your driver has started the trip from ${booking.pickupLocation} to ${booking.dropoffLocation}`,
+            data: {
+                bookingId: booking._id,
+                driverId: booking.b2cPartnerId,
+                pickupLocation: booking.pickupLocation,
+                dropoffLocation: booking.dropoffLocation,
+            },
+            status: "UNREAD",
+        })
+
+        // Send real-time notification to passenger
+        sendRealTimeNotification(booking.passengerId, {
+            type: "TRIP_STARTED",
+            title: "Trip Started",
+            message: `Your driver has started the trip from ${booking.pickupLocation} to ${booking.dropoffLocation}`,
+            data: {
+                bookingId: booking._id,
+                driverId: booking.b2cPartnerId,
+                pickupLocation: booking.pickupLocation,
+                dropoffLocation: booking.dropoffLocation,
+            },
+        })
+
+        res.status(200).json({
+            success: true,
+            booking,
+            message: "Trip started successfully",
+        })
+    } catch (error) {
+        console.error("Error starting B2C trip:", error)
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message,
+        })
+    }
+}
+
+// Complete B2C Booking (Driver)
+// export const completeB2CBooking = async (req, res) => {
+//     try {
+//         const driverId = req.userId
+//         const { bookingId } = req.params
+
+//         const booking = await B2CPassengerBooking.findById(bookingId)
+
+//         if (!booking) {
+//             return res.status(404).json({
+//                 success: false,
+//                 message: "Booking not found",
+//             })
+//         }
+
+//         if (booking.b2cPartnerId.toString() !== driverId) {
+//             return res.status(403).json({
+//                 success: false,
+//                 message: "Unauthorized",
+//             })
+//         }
+
+//         if (booking.bookingStatus !== "CONFIRMED" && booking.bookingStatus !== "IN_PROGRESS") {
+//             return res.status(400).json({
+//                 success: false,
+//                 message: "Booking must be confirmed or in progress before completing",
+//             })
+//         }
+
+//         booking.bookingStatus = "COMPLETED"
+//         booking.completedAt = new Date()
+
+//         // Update payment status to indicate cash payment received
+//         if (booking.paymentMethod === "CASH") {
+//             booking.paymentStatus = "COMPLETED"
+//             booking.paymentReceivedAt = new Date()
+//         }
+
+//         await booking.save()
+
+//         // Process wallet payment
+//         let driverWallet = await Wallet.findOne({ userId: driverId })
+//         if (!driverWallet) {
+//             // Get user role
+//             const driver = await User.findById(driverId)
+//             driverWallet = new Wallet({
+//                 userId: driverId,
+//                 role: driver?.role || "B2C_PARTNER",
+//                 balance: 0,
+//                 totalEarnings: 0,
+//                 totalWithdrawals: 0,
+//             })
+//         }
+
+//         if (booking.paymentMethod === "CASH") {
+//             // For cash payment, driver already has the money
+//             // Deduct admin commission from wallet (but don't go negative)
+//             const commissionData = calculateDriverCommission(booking.paymentAmount)
+
+//             // Only deduct if wallet has sufficient balance
+//             if (driverWallet.balance >= commissionData.adminCommission) {
+//                 driverWallet.balance -= commissionData.adminCommission
+//             }
+
+//             driverWallet.totalEarnings = commissionData.driverEarnings
+
+//             if (!driverWallet.transactions) driverWallet.transactions = []
+//             driverWallet.transactions.push({
+//                 type: "COMMISSION_DEDUCTION",
+//                 amount: commissionData.adminCommission,
+//                 description: `Admin commission for booking ${booking._id}`,
+//                 date: new Date(),
+//                 bookingId: booking._id,
+//             })
+//         } else {
+//             // For card payments, add driver earnings to wallet
+//             driverWallet.balance += booking.driverEarnings
+//             driverWallet.totalEarnings += booking.driverEarnings
+
+//             if (!driverWallet.transactions) driverWallet.transactions = []
+//             driverWallet.transactions.push({
+//                 type: "BOOKING_EARNING",
+//                 amount: booking.driverEarnings,
+//                 description: `Earnings from booking ${booking._id}`,
+//                 date: new Date(),
+//                 bookingId: booking._id,
+//             })
+//         }
+
+//         await driverWallet.save()
+
+//         // Notify passenger
+//         const rideCompleteNotification = await createNotification({
+//             userId: booking.passengerId,
+//             type: "RIDE_COMPLETED",
+//             title: "Ride Completed",
+//             message: "Your ride has been completed. Please rate your experience!",
+//             relatedUserId: driverId,
+//             bookingId: booking._id,
+//         })
+
+//         // Send real-time notification to passenger
+//         await sendRealTimeNotification(booking.passengerId, {
+//             type: "RIDE_COMPLETED",
+//             title: rideCompleteNotification.title,
+//             message: rideCompleteNotification.message,
+//             data: {
+//                 bookingId: booking._id,
+//                 driverId,
+//                 passengerId: booking.passengerId,
+//                 notification: rideCompleteNotification
+//             }
+//         })
+
+//         // Send wallet update notification to driver
+//         await sendRealTimeNotification(driverId, {
+//             type: "WALLET_UPDATED",
+//             title: "Earnings Added",
+//             message: `Your earnings of ${booking.driverEarnings} KWD have been added to your wallet`,
+//             data: {
+//                 newBalance: driverWallet.balance,
+//                 transaction: driverWallet.transactions[driverWallet.transactions.length - 1]
+//             }
+//         })
+
+//         res.status(200).json({
+//             success: true,
+//             booking,
+//             message: "Booking completed successfully",
+//         })
+//     } catch (error) {
+//         console.error("Error completing booking:", error)
+//         res.status(500).json({
+//             success: false,
+//             message: "Server error",
+//             error: error.message,
+//         })
+//     }
+// }
+
+// Complete B2C Booking (Driver)
+export const completeB2CBooking = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { bookingId } = req.params
+
+        const booking = await B2CPassengerBooking.findById(bookingId)
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: "Booking not found",
+            })
+        }
+
+        if (booking.b2cPartnerId.toString() !== driverId) {
+            return res.status(403).json({
+                success: false,
+                message: "Unauthorized",
+            })
+        }
+
+        if (booking.bookingStatus !== "CONFIRMED" && booking.bookingStatus !== "IN_PROGRESS") {
+            return res.status(400).json({
+                success: false,
+                message: "Booking must be confirmed or in progress before completing",
             })
         }
 
         booking.bookingStatus = "COMPLETED"
         booking.completedAt = new Date()
+
+        // Update payment status to indicate cash payment received
+        if (booking.paymentMethod === "CASH") {
+            booking.paymentStatus = "COMPLETED"
+            booking.paymentReceivedAt = new Date()
+        }
+
         await booking.save()
 
         // Process wallet payment
-        let driverWallet = await Wallet.findOne({ userId: booking.b2cPartnerId })
+        let driverWallet = await Wallet.findOne({ userId: driverId })
         if (!driverWallet) {
+            // Get user role
+            const driver = await User.findById(driverId)
             driverWallet = new Wallet({
-                userId: booking.b2cPartnerId,
+                userId: driverId,
+                role: driver?.role || "B2C_PARTNER",
                 balance: 0,
                 totalEarnings: 0,
                 totalWithdrawals: 0,
@@ -2781,17 +3224,18 @@ export const completeB2CBooking = async (req, res) => {
 
         if (booking.paymentMethod === "CASH") {
             // For cash payment, driver already has the money
-            // Deduct admin commission from wallet
-            const commissionData = calculateCommission(booking.paymentAmount)
-            driverWallet.balance -= commissionData.adminCommission
-            driverWallet.totalEarnings += commissionData.fleetOwnerAmount
+            // Deduct admin commission from wallet (balance already verified during acceptance)
+            const commissionData = calculateDriverCommission(booking.paymentAmount)
 
-            // Create transaction record for commission deduction
+            // Safe to deduct since balance was checked during booking acceptance
+            driverWallet.balance -= commissionData.adminCommission
+            driverWallet.totalEarnings = commissionData.driverEarnings
+
             if (!driverWallet.transactions) driverWallet.transactions = []
             driverWallet.transactions.push({
                 type: "COMMISSION_DEDUCTION",
                 amount: commissionData.adminCommission,
-                description: `Admin commission (${ADMIN_COMMISSION_PERCENTAGE}%) for booking ${booking._id}`,
+                description: `Admin commission for booking ${booking._id}`,
                 date: new Date(),
                 bookingId: booking._id,
             })
@@ -2813,80 +3257,54 @@ export const completeB2CBooking = async (req, res) => {
         await driverWallet.save()
 
         // Notify passenger
-        await Notification.create({
-            recipientId: booking.passengerId,
+        const rideCompleteNotification = await createNotification({
             userId: booking.passengerId,
             type: "RIDE_COMPLETED",
             title: "Ride Completed",
             message: "Your ride has been completed. Please rate your experience!",
-            data: {
-                bookingId: booking._id,
-            },
-            status: "UNREAD",
+            relatedUserId: driverId,
+            bookingId: booking._id,
         })
 
-        return res.status(200).json({
+        // Send real-time notification to passenger
+        await sendRealTimeNotification(booking.passengerId, {
+            type: "RIDE_COMPLETED",
+            title: rideCompleteNotification.title,
+            message: rideCompleteNotification.message,
+            data: {
+                bookingId: booking._id,
+                driverId,
+                passengerId: booking.passengerId,
+                notification: rideCompleteNotification
+            }
+        })
+
+        // Send wallet update notification to driver
+        await sendRealTimeNotification(driverId, {
+            type: "WALLET_UPDATED",
+            title: "Earnings Added",
+            message: `Your earnings of ${booking.driverEarnings} KWD have been added to your wallet`,
+            data: {
+                newBalance: driverWallet.balance,
+                transaction: driverWallet.transactions[driverWallet.transactions.length - 1]
+            }
+        })
+
+        res.status(200).json({
             success: true,
             booking,
             message: "Booking completed successfully",
         })
     } catch (error) {
         console.error("Error completing booking:", error)
-        return res.status(500).json({
+        res.status(500).json({
             success: false,
             message: "Server error",
+            error: error.message,
         })
     }
 }
 
-// Get passenger bookings
-// export const getPassengerBookings = async (req, res) => {
-//     try {
-//         const passengerId = req.userId
-//         const { status, type = "all" } = req.query
-
-//         const query = { passengerId }
-
-//         if (status) {
-//             query.bookingStatus = status
-//         }
-
-//         let bookings = []
-
-//         if (type === "all" || type === "b2c") {
-//             const b2cBookings = await B2CPassengerBooking.find(query)
-//                 .populate("partnerId", "fullName companyLogo whatsappNumber")
-//                 .populate("b2cPartnerId", "fullName companyLogo whatsappNumber")
-//                 .sort({ createdAt: -1 })
-
-//             bookings = [...bookings, ...b2cBookings.map((b) => ({ ...b.toObject(), type: "B2C" }))]
-//         }
-
-//         if (type === "all" || type === "corporate") {
-//             const corporateBookings = await CorporateBooking.find(query)
-//                 .populate("corporateOwnerId", "companyName companyLogo")
-//                 .populate("routeId", "fromLocation toLocation")
-//                 .sort({ createdAt: -1 })
-
-//             bookings = [...bookings, ...corporateBookings.map((b) => ({ ...b.toObject(), type: "CORPORATE" }))]
-//         }
-
-//         // Sort all bookings by date
-//         bookings.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-
-//         return res.status(200).json({
-//             success: true,
-//             bookings,
-//             totalBookings: bookings.length,
-//         })
-//     } catch (error) {
-//         console.error("Error fetching passenger bookings:", error)
-//         return res.status(500).json({
-//             success: false,
-//             message: "Server error",
-//         })
-//     }
-// }
 
 // Get passenger bookings
 export const getPassengerBookings = async (req, res) => {
@@ -3143,6 +3561,28 @@ export const handleStripeWebhook = async (req, res) => {
                     },
                     status: "UNREAD",
                 })
+
+                // Send real-time notification to B2C partner
+                sendRealTimeNotification(booking.b2cPartnerId, {
+                    type: "NEW_BOOKING",
+                    title: "New Paid Booking",
+                    message: `Payment received via Stripe. Amount: AED ${booking.paymentAmount}`,
+                    data: {
+                        bookingId: booking._id,
+                        paymentAmount: booking.paymentAmount,
+                    },
+                })
+
+                // Send real-time notification to B2C partner
+                sendRealTimeNotification(booking.b2cPartnerId, {
+                    type: "NEW_BOOKING",
+                    title: "New Paid Booking",
+                    message: `Payment received via Tap Payment. Amount: AED ${booking.paymentAmount}`,
+                    data: {
+                        bookingId: booking._id,
+                        paymentAmount: booking.paymentAmount,
+                    },
+                })
             }
         }
     }
@@ -3214,3 +3654,324 @@ export const getAvailableSeats = async (req, res) => {
         })
     }
 }
+
+// Get B2B_Partner driver bookings
+export const getB2B_PartnerDriverBookings = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { status } = req.query
+
+        const query = { driverId }
+        if (status) {
+            query.bookingStatus = status
+        }
+
+        const bookings = await CorporateBooking.find(query)
+            .populate("passengerId", "fullName whatsappNumber email")
+            .populate("corporateOwnerId", "companyName")
+            .sort({ createdAt: -1 })
+
+        res.status(200).json({
+            success: true,
+            bookings,
+            count: bookings.length,
+        })
+    } catch (error) {
+        console.error("Error fetching corporate driver bookings:", error)
+        res.status(500).json({
+            success: false,
+            message: "Error fetching bookings",
+            error: error.message,
+        })
+    }
+}
+
+// Start B2B_Partner Driver Trip
+export const startB2B_PartnerDriverTrip = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { bookingId } = req.params
+
+        const booking = await CorporateBooking.findById(bookingId)
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: "Booking not found",
+            })
+        }
+
+        if (booking.driverId?.toString() !== driverId) {
+            return res.status(403).json({
+                success: false,
+                message: "Unauthorized: This booking does not belong to you",
+            })
+        }
+
+        booking.bookingStatus = "IN_PROGRESS"
+        booking.startedAt = new Date()
+        await booking.save()
+
+        // Notify employee
+        const tripStartNotification = await createNotification({
+            userId: booking.passengerId,
+            type: "TRIP_STARTED",
+            title: "Trip Started",
+            message: "Your corporate trip has started",
+            relatedUserId: driverId,
+            bookingId: booking._id,
+        })
+
+
+        // Send real-time notification to employee
+        await sendRealTimeNotification(booking.passengerId, {
+            type: "TRIP_STARTED",
+            title: tripStartNotification.title,
+            message: tripStartNotification.message,
+            data: {
+                bookingId: booking._id,
+                driverId,
+                passengerId: booking.passengerId,
+                notification: tripStartNotification
+            }
+        })
+
+        res.status(200).json({
+            success: true,
+            booking,
+            message: "Trip started successfully",
+        })
+    } catch (error) {
+        console.error("Error starting trip:", error)
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message,
+        })
+    }
+}
+
+// Complete Corporate Booking
+export const completeB2B_PartnerDriverBooking = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { bookingId } = req.params
+
+        const booking = await CorporateBooking.findById(bookingId)
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: "Booking not found",
+            })
+        }
+
+        if (booking.driverId?.toString() !== driverId) {
+            return res.status(403).json({
+                success: false,
+                message: "Unauthorized: This booking does not belong to you",
+            })
+        }
+
+        booking.bookingStatus = "COMPLETED"
+        booking.completedAt = new Date()
+        await booking.save()
+
+        // Notify employee
+        const corporateTripCompleteNotification = await createNotification({
+            userId: booking.passengerId,
+            type: "RIDE_COMPLETED",
+            title: "Trip Completed",
+            message: "Your corporate trip has been completed",
+            relatedUserId: driverId,
+            bookingId: booking._id,
+        })
+
+        // Send real-time notification to employee
+        await sendRealTimeNotification(booking.passengerId, {
+            type: "RIDE_COMPLETED",
+            title: corporateTripCompleteNotification.title,
+            message: corporateTripCompleteNotification.message,
+            data: {
+                bookingId: booking._id,
+                driverId,
+                passengerId: booking.passengerId,
+                notification: corporateTripCompleteNotification
+            }
+        })
+
+        res.status(200).json({
+            success: true,
+            booking,
+            message: "Booking completed successfully",
+        })
+    } catch (error) {
+        console.error("Error completing corporate booking:", error)
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message,
+        })
+    }
+}
+
+// Get corporate driver bookings
+export const getCorporateDriverBookings = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { status } = req.query
+
+        const query = { driverId }
+        if (status) {
+            query.bookingStatus = status
+        }
+
+        const bookings = await CorporateBooking.find(query)
+            .populate("passengerId", "fullName whatsappNumber email")
+            .populate("corporateOwnerId", "companyName")
+            .sort({ createdAt: -1 })
+
+        res.status(200).json({
+            success: true,
+            bookings,
+            count: bookings.length,
+        })
+    } catch (error) {
+        console.error("Error fetching corporate driver bookings:", error)
+        res.status(500).json({
+            success: false,
+            message: "Error fetching bookings",
+            error: error.message,
+        })
+    }
+}
+
+// Start Corporate Trip
+export const startCorporateTrip = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { bookingId } = req.params
+
+        const booking = await CorporateBooking.findById(bookingId)
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: "Booking not found",
+            })
+        }
+
+        if (booking.driverId?.toString() !== driverId) {
+            return res.status(403).json({
+                success: false,
+                message: "Unauthorized: This booking does not belong to you",
+            })
+        }
+
+        booking.bookingStatus = "IN_PROGRESS"
+        booking.startedAt = new Date()
+        await booking.save()
+
+        // Notify employee
+        const tripStartNotification = await createNotification({
+            userId: booking.passengerId,
+            type: "TRIP_STARTED",
+            title: "Trip Started",
+            message: "Your corporate trip has started",
+            relatedUserId: driverId,
+            bookingId: booking._id,
+        })
+
+        // Send real-time notification to employee
+        await sendRealTimeNotification(booking.passengerId, {
+            type: "TRIP_STARTED",
+            title: tripStartNotification.title,
+            message: tripStartNotification.message,
+            data: {
+                bookingId: booking._id,
+                driverId,
+                passengerId: booking.passengerId,
+                notification: tripStartNotification
+            }
+        })
+
+        res.status(200).json({
+            success: true,
+            booking,
+            message: "Trip started successfully",
+        })
+    } catch (error) {
+        console.error("Error starting trip:", error)
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message,
+        })
+    }
+}
+
+// Complete Corporate Booking
+export const completeCorporateBooking = async (req, res) => {
+    try {
+        const driverId = req.userId
+        const { bookingId } = req.params
+
+        const booking = await CorporateBooking.findById(bookingId)
+
+        if (!booking) {
+            return res.status(404).json({
+                success: false,
+                message: "Booking not found",
+            })
+        }
+
+        if (booking.driverId?.toString() !== driverId) {
+            return res.status(403).json({
+                success: false,
+                message: "Unauthorized: This booking does not belong to you",
+            })
+        }
+
+        booking.bookingStatus = "COMPLETED"
+        booking.completedAt = new Date()
+        await booking.save()
+
+        // Notify employee
+        const corporateTripCompleteNotification = await createNotification({
+            userId: booking.passengerId,
+            type: "RIDE_COMPLETED",
+            title: "Trip Completed",
+            message: "Your corporate trip has been completed",
+            relatedUserId: driverId,
+            bookingId: booking._id,
+        })
+
+        // Send real-time notification to employee
+        await sendRealTimeNotification(booking.passengerId, {
+            type: "RIDE_COMPLETED",
+            title: corporateTripCompleteNotification.title,
+            message: corporateTripCompleteNotification.message,
+            data: {
+                bookingId: booking._id,
+                driverId,
+                passengerId: booking.passengerId,
+                notification: corporateTripCompleteNotification
+            }
+        })
+
+        res.status(200).json({
+            success: true,
+            booking,
+            message: "Booking completed successfully",
+        })
+    } catch (error) {
+        console.error("Error completing corporate booking:", error)
+        res.status(500).json({
+            success: false,
+            message: "Server error",
+            error: error.message,
+        })
+    }
+}
+
+

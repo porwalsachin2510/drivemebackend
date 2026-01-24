@@ -30,7 +30,7 @@ const notificationSchema = new mongoose.Schema(
                 "BOOKING_REJECTED",
                 "BOOKING_CANCELLED",
                 "RIDE_COMPLETED",
-                "CORPORATE_BOOKING",
+                "NEW_CORPORATE_BOOKING",
                 "PAYMENT_PENDING",
                 "PAYMENT_COMPLETED",
                 "PAYMENT_FAILED",
@@ -39,6 +39,8 @@ const notificationSchema = new mongoose.Schema(
                 "DRIVER_ARRIVING",
                 "RIDE_STARTED",
                 "REVIEW_REQUEST",
+                "TRIP_STARTED",
+                "TRIP_COMPLETED",
             ],
             required: true,
         },
@@ -53,6 +55,19 @@ const notificationSchema = new mongoose.Schema(
         data: {
             type: mongoose.Schema.Types.Mixed,
             default: {},
+        },
+        relatedUserId: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            required: false,
+        },
+        bookingId: {
+            type: mongoose.Schema.Types.ObjectId,
+            refPath: {
+                type: String,
+                enum: ["B2CPassengerBooking", "CorporateBooking"]
+            },
+            required: false,
         },
         relatedEntityId: mongoose.Schema.Types.ObjectId,
         relatedEntityType: {

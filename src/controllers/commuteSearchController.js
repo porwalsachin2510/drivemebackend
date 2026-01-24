@@ -291,7 +291,24 @@ export const searchCommuteRoutes = async (req, res) => {
                         const vehicle = await Vehicle.findById(assigned.vehicleId)
                         if (!vehicle || !vehicle.isActive) continue
 
-                        const driver = await Driver.findById(assigned.driverId)
+                        let driver
+                        if (assigned.driverModel === "Driver") {
+                            // For B2B Partner Drivers, find User account with driverId reference
+                            driver = await User.findOne({
+                                driverId: assigned.driverId,
+                                driverModel: "Driver",
+                                role: "B2B_PARTNER_DRIVER"
+                            }).populate('driverId', 'name email phone')
+                        } else if (assigned.driverModel === "CorporateDriver") {
+                            // For Corporate Drivers, find User account with driverId reference
+                            driver = await User.findOne({
+                                driverId: assigned.driverId,
+                                driverModel: "CorporateDriver",
+                                role: "CORPORATE_DRIVER"
+                            }).populate('driverId', 'name email phone')
+                        }
+
+                        if (!driver) continue
 
                         const travelPath = buildTravelPath(
                             route.fromLocation,
@@ -315,6 +332,10 @@ export const searchCommuteRoutes = async (req, res) => {
                         routes.push({
                             routeId: route._id,
                             contractId: route.contractId,
+                            corporateOwnerId: user.companyId,
+                            driverId: driver._id,
+                            driverName: driver.fullName,
+                            driverImage: driver.profileImage,
                             company: company.companyName,
                             companyLogo: company.companyLogo || null,
 
@@ -346,8 +367,6 @@ export const searchCommuteRoutes = async (req, res) => {
                             vehicleModel: vehicle.vehicleName,
                             vehiclePlate: vehicle.registrationNumber,
                             images: vehicle.photos?.map((p) => p.url) || [],
-
-                            driverName: driver?.name || null,
 
                             type: "company",
                         })
