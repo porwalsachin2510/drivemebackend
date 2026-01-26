@@ -147,7 +147,12 @@ const userSchema = new mongoose.Schema(
         driverModel: {
             type: String,
             enum: ["Driver", "CorporateDriver"],
-            default: null,
+            required: function () {
+                return [
+                    "B2B_PARTNER_DRIVER",
+                    "CORPORATE_DRIVER"
+                ].includes(this.role);
+            },
         },
         acceptedPaymentMethods: {
             type: [String],
